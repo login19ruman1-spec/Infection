@@ -1,0 +1,51 @@
+# Настройки новых сердец.
+# Установленные сердца настраиваются через GUI.
+defaults:
+  radius: 32
+  spread-seconds: 3
+  damage-after-seconds: 90
+
+  defence-enabled: true
+  guard-limit: 6
+  defence-cooldown-seconds: 20
+
+spread:
+  attempts: 8
+  frontier-limit: 512
+  tree-chance: 0.02
+
+  # Общий предохранитель для журнала изменённых блоков.
+  max-recorded-blocks: 30000
+
+rollback:
+  # Восстановление небольшими порциями.
+  blocks-per-step: 80
+
+mobs:
+  infection-chance: 0.10
+  max-loaded-infected: 40
+
+defence:
+  detection-radius: 16
+  wave-size: 2
+  spawn-radius: 5
+
+  types:
+    - ZOMBIE
+    - SKELETON
+    - SPIDER
+    - CREEPER
+    - ZOMBIE_VILLAGER
+
+hallucinations:
+  sounds: true
+  visual-effects: true
+  damage-per-second: 1.0
+  recovery-per-second: 3
+
+models:
+  # true — создать простые демонстрационные модели,
+  # но только если соответствующих файлов ещё нет.
+  generate-examples: true
+
+  max-cubes: 24
