@@ -1,0 +1,17 @@
+name: Infection
+version: 1.0.0
+main: ru.infection.InfectionPlugin
+api-version: "1.21.4"
+description: Sculk and pale infection with hearts and rollback
+
+commands:
+  infection:
+    description: Управление заражением
+    usage: /infection
+    aliases:
+      - inf
+
+permissions:
+  infection.admin:
+    description: Создание и настройка сердец
+    default: op
