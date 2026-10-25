@@ -718,7 +718,7 @@ public final class InfectionPlugin extends JavaPlugin
         return null;
     }
 
-    // ---------- Галлюцинации ----------
+       // ---------- Галлюцинации ----------
 
     private void playersTick() {
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -738,7 +738,8 @@ public final class InfectionPlugin extends JavaPlugin
                             1,
                             getConfig().getInt(
                                     "hallucinations.recovery-per-second",
-                                    3)
+                                    3
+                            )
                     );
 
                     if (state.seconds <= 0
@@ -774,7 +775,762 @@ public final class InfectionPlugin extends JavaPlugin
                             "minecraft:ambient.cave"
                         };
 
+                Location soundLocation = player.getLocation().add(
+                        random.nextDouble() * 10 - 5,
+                        random.nextDouble() * 3,
+                        random.nextDouble() * 10 - 5
+                );
+
                 player.playSound(
-                        player.getLocation().add(
-                                random.nextDouble() * 10 - 5,
-                                random.nextDouble() *
+                        soundLocation,
+                        sounds[random.nextInt(sounds.length)],
+                        SoundCategory.AMBIENT,
+                        0.45f,
+                        0.65f + random.nextFloat() * 0.55f
+                );
+            }
+
+            boolean visualsDisabled =
+                    player.getPersistentDataContainer().has(
+                            visualsKey,
+                            PersistentDataType.BYTE
+                    );
+
+            if (getConfig().getBoolean(
+                    "hallucinations.visual-effects", true)
+                    && !visualsDisabled) {
+
+                if (state.seconds >= 15) {
+                    player.spawnParticle(
+                            heart.kind == Kind.SCULK
+                                    ? Particle.SCULK_SOUL
+                                    : Particle.ASH,
+                            player.getEyeLocation(),
+                            5,
+                            0.9, 0.5, 0.9,
+                            0.01
+                    );
+                }
+
+                if (state.seconds >= 30) {
+                    player.addPotionEffect(new PotionEffect(
+                            PotionEffectType.DARKNESS,
+                            50,
+                            0,
+                            false,
+                            false,
+                            true
+                    ));
+                }
+
+                if (state.seconds >= 60
+                        && state.seconds % 15 == 0) {
+                    player.addPotionEffect(new PotionEffect(
+                            PotionEffectType.NAUSEA,
+                            100,
+                            0,
+                            false,
+                            false,
+                            true
+                    ));
+                }
+            }
+
+            if (state.seconds == heart.damageAfter - 10) {
+                player.sendMessage(Component.text(
+                        "The infection is becoming dangerous. "
+                                + "Leave this area."
+                ));
+            }
+
+            if (state.seconds >= heart.damageAfter) {
+                double damage = Math.max(
+                        0,
+                        getConfig().getDouble(
+                                "hallucinations.damage-per-second",
+                                1.0
+                        )
+                );
+
+                if (damage > 0) {
+                    infectionDamage(player, heart.kind, damage);
+                }
+            }
+        }
+    }
+
+    void infectionDamage(Player player, Kind kind, double amount) {
+        if (!vulnerable(player)
+                || !Double.isFinite(amount)
+                || amount <= 0) {
+            return;
+        }
+
+        UUID id = player.getUniqueId();
+        damageReason.put(id, kind);
+
+        try {
+            player.damage(amount);
+        } finally {
+            damageReason.remove(id);
+        }
+    }
+
+    @EventHandler
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        Player player = event.getEntity();
+        Kind reason = damageReason.get(player.getUniqueId());
+
+        if (reason != null) {
+            event.deathMessage(Component.text(
+                    player.getName()
+                            + (reason == Kind.SCULK
+                            ? " was consumed by the sculk infection."
+                            : " was consumed by the pale infection.")
+            ));
+        }
+
+        exposure.remove(player.getUniqueId());
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        exposure.remove(id);
+        damageReason.remove(id);
+    }
+
+    // ---------- Commands ----------
+
+    @Override
+    public boolean onCommand(
+            CommandSender sender,
+            Command command,
+            String label,
+            String[] args) {
+
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(
+                    "Use this command as a player."
+            );
+            return true;
+        }
+
+        if (args.length > 0
+                && args[0].equalsIgnoreCase("visuals")) {
+
+            var persistent = player.getPersistentDataContainer();
+
+            if (persistent.has(
+                    visualsKey, PersistentDataType.BYTE)) {
+
+                persistent.remove(visualsKey);
+
+                player.sendMessage(Component.text(
+                        "Infection visual effects enabled."
+                ));
+            } else {
+                persistent.set(
+                        visualsKey,
+                        PersistentDataType.BYTE,
+                        (byte) 1
+                );
+
+                player.sendMessage(Component.text(
+                        "Infection visual effects disabled. "
+                                + "Sounds and infection damage remain active."
+                ));
+            }
+
+            return true;
+        }
+
+        if (!player.hasPermission("infection.admin")) {
+            player.sendMessage(Component.text(
+                    "You do not have permission to manage hearts."
+            ));
+            return true;
+        }
+
+        if (args.length == 0) {
+            help(player);
+            return true;
+        }
+
+        try {
+            switch (args[0].toLowerCase(Locale.ROOT)) {
+                case "create" -> {
+                    if (args.length != 2) {
+                        player.sendMessage(Component.text(
+                                "Usage: /infection create sculk|pale"
+                        ));
+                        return true;
+                    }
+
+                    Kind kind;
+
+                    if (args[1].equalsIgnoreCase("sculk")) {
+                        kind = Kind.SCULK;
+                    } else if (args[1].equalsIgnoreCase("pale")) {
+                        kind = Kind.PALE;
+                    } else {
+                        player.sendMessage(Component.text(
+                                "Choose sculk or pale."
+                        ));
+                        return true;
+                    }
+
+                    createHeart(player, kind);
+                }
+
+                case "gui" -> {
+                    Heart heart = near(player);
+
+                    if (heart == null) {
+                        player.sendMessage(Component.text(
+                                "Stand within 8 blocks of a heart."
+                        ));
+                    } else {
+                        player.openInventory(
+                                new Menu(heart).getInventory()
+                        );
+                    }
+                }
+
+                case "remove" -> {
+                    Heart heart = near(player);
+
+                    if (heart == null) {
+                        player.sendMessage(Component.text(
+                                "Stand within 8 blocks of a heart."
+                        ));
+                    } else {
+                        removeHeart(heart);
+
+                        player.sendMessage(Component.text(
+                                "Heart removed. Recorded blocks will "
+                                        + "be restored in loaded chunks."
+                        ));
+                    }
+                }
+
+                case "list" -> {
+                    player.sendMessage(Component.text(
+                            "Active hearts: " + data.hearts.size()
+                    ));
+
+                    for (Heart heart : data.hearts.values()) {
+                        Location location = heart.pos.location();
+
+                        String worldName = location == null
+                                ? "unavailable world"
+                                : location.getWorld().getName();
+
+                        player.sendMessage(Component.text(
+                                heart.kind.name()
+                                        + " | " + worldName
+                                        + " | " + heart.pos.x()
+                                        + ", " + heart.pos.y()
+                                        + ", " + heart.pos.z()
+                                        + " | radius " + heart.radius
+                        ));
+                    }
+                }
+
+                case "reload" -> {
+                    reloadConfig();
+                    models.reload();
+                    mobs.reloadModels();
+
+                    player.sendMessage(Component.text(
+                            "Configuration and models reloaded. "
+                                    + "Existing hearts keep their GUI settings."
+                    ));
+                }
+
+                default -> help(player);
+            }
+        } catch (Exception ex) {
+            getLogger().severe(
+                    "Command failed: " + ex.getMessage()
+            );
+            ex.printStackTrace();
+
+            player.sendMessage(Component.text(
+                    "The operation failed. Check the server console."
+            ));
+        }
+
+        return true;
+    }
+
+    private void help(Player player) {
+        player.sendMessage(Component.text(
+                "/infection create sculk - create a sculk heart"
+        ));
+        player.sendMessage(Component.text(
+                "/infection create pale - create a pale heart"
+        ));
+        player.sendMessage(Component.text(
+                "/infection gui - configure the nearest heart"
+        ));
+        player.sendMessage(Component.text(
+                "/infection remove - remove the nearest heart"
+        ));
+        player.sendMessage(Component.text(
+                "/infection list - list active hearts"
+        ));
+        player.sendMessage(Component.text(
+                "/infection reload - reload configuration and models"
+        ));
+        player.sendMessage(Component.text(
+                "/infection visuals - toggle personal visual effects"
+        ));
+    }
+
+    private void createHeart(Player player, Kind kind)
+            throws Exception {
+
+        Block ground = player.getTargetBlockExact(6);
+
+        if (ground == null
+                || !NATURAL.contains(ground.getType())) {
+            player.sendMessage(Component.text(
+                    "Look at natural ground within 6 blocks."
+            ));
+            return;
+        }
+
+        Block core = loaded(
+                ground.getLocation().add(0, 1, 0)
+        );
+
+        if (core == null || !core.getType().isAir()) {
+            player.sendMessage(Component.text(
+                    "There must be an empty block above the ground."
+            ));
+            return;
+        }
+
+        if (coreAt(core) != null
+                || data.edits.containsKey(Pos.of(core))
+                || data.edits.containsKey(Pos.of(ground))) {
+            player.sendMessage(Component.text(
+                    "This position is already part of recorded infection."
+            ));
+            return;
+        }
+
+        Heart heart = new Heart();
+
+        heart.id = UUID.randomUUID();
+        heart.kind = kind;
+        heart.pos = Pos.of(core);
+
+        heart.radius = InfectionData.clamp(
+                getConfig().getInt("defaults.radius", 32),
+                8, 128
+        );
+
+        heart.spreadSeconds = InfectionData.clamp(
+                getConfig().getInt(
+                        "defaults.spread-seconds", 3),
+                1, 60
+        );
+
+        heart.damageAfter = InfectionData.clamp(
+                getConfig().getInt(
+                        "defaults.damage-after-seconds", 90),
+                30, 600
+        );
+
+        heart.defence = getConfig().getBoolean(
+                "defaults.defence-enabled", true
+        );
+
+        heart.guardLimit = InfectionData.clamp(
+                getConfig().getInt(
+                        "defaults.guard-limit", 6),
+                0, 30
+        );
+
+        heart.cooldown = InfectionData.clamp(
+                getConfig().getInt(
+                        "defaults.defence-cooldown-seconds", 20),
+                5, 120
+        );
+
+        heart.frontier.add(Pos.of(ground));
+
+        Map<Block, BlockData> batch = new LinkedHashMap<>();
+
+        batch.put(core, kind.core().createBlockData());
+        batch.put(ground, kind.ground().createBlockData());
+
+        data.hearts.put(heart.id, heart);
+
+        boolean applied;
+
+        try {
+            applied = data.apply(
+                    heart,
+                    batch,
+                    Math.max(
+                            100,
+                            getConfig().getInt(
+                                    "spread.max-recorded-blocks",
+                                    30000
+                            )
+                    )
+            );
+        } catch (Exception ex) {
+            // If the journal was already written, removing the
+            // heart schedules its recorded changes for rollback.
+            data.removeHeart(heart.id);
+            throw ex;
+        }
+
+        if (!applied) {
+            data.hearts.remove(heart.id);
+
+            player.sendMessage(Component.text(
+                    "Heart creation was refused. "
+                            + "Check the recorded-block limit and position."
+            ));
+            return;
+        }
+
+        player.sendMessage(Component.text(
+                kind.name()
+                        + " heart created. Right-click it "
+                        + "or use /infection gui to configure it."
+        ));
+    }
+
+    private void removeHeart(Heart heart) throws Exception {
+        data.removeHeart(heart.id);
+
+        // Loaded guards disappear and ordinary mobs are cured.
+        // Unloaded mobs are handled when they become loaded.
+        mobs.scan();
+    }
+
+    // ---------- Heart GUI ----------
+
+    private ItemStack menuItem(
+            Material material,
+            String title,
+            String... description) {
+
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+
+        meta.displayName(Component.text(title));
+
+        List<Component> lore = new ArrayList<>();
+
+        for (String line : description) {
+            lore.add(Component.text(line));
+        }
+
+        meta.lore(lore);
+        item.setItemMeta(meta);
+
+        return item;
+    }
+
+    private void draw(Inventory inventory, Heart heart) {
+        inventory.clear();
+
+        inventory.setItem(4, menuItem(
+                heart.kind.core(),
+                heart.kind.name() + " heart",
+                "Settings apply to this heart only."
+        ));
+
+        inventory.setItem(10, menuItem(
+                Material.COMPASS,
+                "Radius: " + heart.radius,
+                "Left click: +8",
+                "Right click: -8",
+                "Range: 8-128 blocks"
+        ));
+
+        inventory.setItem(11, menuItem(
+                Material.CLOCK,
+                "Spread interval: " + heart.spreadSeconds + " s",
+                "Left click: +1 second (slower)",
+                "Right click: -1 second (faster)",
+                "Range: 1-60 seconds"
+        ));
+
+        inventory.setItem(12, menuItem(
+                Material.SPIDER_EYE,
+                "Damage starts after: " + heart.damageAfter + " s",
+                "Left click: +15 seconds",
+                "Right click: -15 seconds",
+                "Range: 30-600 seconds"
+        ));
+
+        inventory.setItem(14, menuItem(
+                Material.SHIELD,
+                "Defence: " + (heart.defence ? "ON" : "OFF"),
+                "Click to toggle."
+        ));
+
+        inventory.setItem(15, menuItem(
+                Material.ZOMBIE_HEAD,
+                "Guard limit: " + heart.guardLimit,
+                "Left click: +1",
+                "Right click: -1",
+                "Range: 0-30 guards"
+        ));
+
+        inventory.setItem(16, menuItem(
+                Material.REPEATER,
+                "Wave cooldown: " + heart.cooldown + " s",
+                "Left click: +5 seconds",
+                "Right click: -5 seconds",
+                "Range: 5-120 seconds"
+        ));
+
+        inventory.setItem(22, menuItem(
+                Material.BARRIER,
+                "Remove this heart",
+                "Shift + right click to confirm.",
+                "Starts rollback of recorded blocks."
+        ));
+    }
+
+    @EventHandler
+    public void onMenuClick(InventoryClickEvent event) {
+        if (!(event.getView().getTopInventory().getHolder()
+                instanceof Menu menu)) {
+            return;
+        }
+
+        event.setCancelled(true);
+
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (!player.hasPermission("infection.admin")) {
+            player.closeInventory();
+            return;
+        }
+
+        int slot = event.getRawSlot();
+
+        if (slot < 0
+                || slot >= event.getView()
+                        .getTopInventory().getSize()) {
+            return;
+        }
+
+        Heart heart = data.hearts.get(menu.heart);
+
+        if (heart == null) {
+            player.closeInventory();
+            player.sendMessage(Component.text(
+                    "This heart no longer exists."
+            ));
+            return;
+        }
+
+        try {
+            if (slot == 22) {
+                if (event.getClick() == ClickType.SHIFT_RIGHT) {
+                    removeHeart(heart);
+                    player.closeInventory();
+
+                    player.sendMessage(Component.text(
+                            "Heart removed. Rollback has been scheduled "
+                                    + "for its recorded blocks."
+                    ));
+                }
+                return;
+            }
+
+            if (event.getClick() != ClickType.LEFT
+                    && event.getClick() != ClickType.RIGHT) {
+                return;
+            }
+
+            int direction = event.getClick() == ClickType.LEFT
+                    ? 1 : -1;
+
+            switch (slot) {
+                case 10 -> heart.radius = InfectionData.clamp(
+                        heart.radius + direction * 8, 8, 128);
+
+                case 11 -> heart.spreadSeconds = InfectionData.clamp(
+                        heart.spreadSeconds + direction, 1, 60);
+
+                case 12 -> heart.damageAfter = InfectionData.clamp(
+                        heart.damageAfter + direction * 15,
+                        30, 600);
+
+                case 14 -> heart.defence = !heart.defence;
+
+                case 15 -> heart.guardLimit = InfectionData.clamp(
+                        heart.guardLimit + direction, 0, 30);
+
+                case 16 -> heart.cooldown = InfectionData.clamp(
+                        heart.cooldown + direction * 5, 5, 120);
+
+                default -> {
+                    return;
+                }
+            }
+
+            data.save();
+            draw(menu.inventory, heart);
+
+        } catch (Exception ex) {
+            getLogger().severe(
+                    "Could not save heart settings: "
+                            + ex.getMessage()
+            );
+            ex.printStackTrace();
+
+            player.closeInventory();
+            player.sendMessage(Component.text(
+                    "The change could not be saved. "
+                            + "Check the server console."
+            ));
+
+            Bukkit.getPluginManager().disablePlugin(this);
+        }
+    }
+
+    @EventHandler
+    public void onMenuDrag(InventoryDragEvent event) {
+        if (event.getView().getTopInventory().getHolder()
+                instanceof Menu) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---------- Heart interaction and protection ----------
+
+    @EventHandler(ignoreCancelled = true)
+    public void onHeartInteract(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK
+                || event.getHand() != EquipmentSlot.HAND
+                || event.getClickedBlock() == null) {
+            return;
+        }
+
+        Heart heart = coreAt(event.getClickedBlock());
+
+        if (heart == null) {
+            return;
+        }
+
+        event.setCancelled(true);
+
+        Player player = event.getPlayer();
+
+        if (player.hasPermission("infection.admin")) {
+            player.openInventory(
+                    new Menu(heart).getInventory()
+            );
+        }
+    }
+
+    @EventHandler(
+            priority = EventPriority.HIGH,
+            ignoreCancelled = true
+    )
+    public void onHeartDamage(BlockDamageEvent event) {
+        Heart heart = coreAt(event.getBlock());
+
+        if (heart != null) {
+            // Existing cooldown and guard limits still apply.
+            defend(heart);
+        }
+    }
+
+    @EventHandler(
+            priority = EventPriority.HIGHEST,
+            ignoreCancelled = true
+    )
+    public void onHeartBreak(BlockBreakEvent event) {
+        Heart heart = coreAt(event.getBlock());
+
+        if (heart == null) {
+            return;
+        }
+
+        // Do not give a vanilla block drop.
+        // The recorded original block is restored by rollback.
+        event.setCancelled(true);
+
+        try {
+            removeHeart(heart);
+
+            event.getPlayer().sendMessage(Component.text(
+                    "Heart destroyed. Its infection is receding."
+            ));
+        } catch (Exception ex) {
+            getLogger().severe(
+                    "Could not remove heart: " + ex.getMessage()
+            );
+            ex.printStackTrace();
+
+            event.getPlayer().sendMessage(Component.text(
+                    "The heart could not be removed. "
+                            + "Check the server console."
+            ));
+        }
+    }
+
+    @EventHandler(
+            priority = EventPriority.HIGHEST,
+            ignoreCancelled = true
+    )
+    public void protectFromEntityExplosion(
+            EntityExplodeEvent event) {
+
+        event.blockList().removeIf(
+                block -> coreAt(block) != null
+        );
+    }
+
+    @EventHandler(
+            priority = EventPriority.HIGHEST,
+            ignoreCancelled = true
+    )
+    public void protectFromBlockExplosion(
+            BlockExplodeEvent event) {
+
+        event.blockList().removeIf(
+                block -> coreAt(block) != null
+        );
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void protectFromPistonExtend(
+            BlockPistonExtendEvent event) {
+
+        for (Block block : event.getBlocks()) {
+            if (coreAt(block) != null) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void protectFromPistonRetract(
+            BlockPistonRetractEvent event) {
+
+        for (Block block : event.getBlocks()) {
+            if (coreAt(block) != null) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+    }
+}
