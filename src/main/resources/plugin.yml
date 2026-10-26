@@ -1,8 +1,9 @@
 name: Infection
-version: 1.0.0
+version: '2.0.0'
 main: ru.infection.InfectionPlugin
-api-version: "1.21.4"
-description: Sculk and pale infection with hearts and rollback
+api-version: '1.21'
+description: Бесконечное заражение скалком и бледным мхом
+author: Infection
 
 commands:
   infection:
