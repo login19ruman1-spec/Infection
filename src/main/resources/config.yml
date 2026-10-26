@@ -1,41 +1,45 @@
-# Настройки новых сердец.
-# Установленные сердца настраиваются через GUI.
+# Граница распространения по расстоянию отсутствует.
+# Новые чанки плагин сам не генерирует и не держит загруженными.
+
 defaults:
-  radius: 32
-  spread-seconds: 3
-  damage-after-seconds: 90
+  depth: 8
+  columns-per-second: 24
+  damage-after-seconds: 45
+  heart-height: 7
+  defence: true
 
-  defence-enabled: true
-  guard-limit: 6
-  defence-cooldown-seconds: 20
+performance:
+  # Общий бюджет изменений мира за тик.
+  # Это техническая очередь, не максимальный размер заражения.
+  changes-per-tick: 60
 
-spread:
-  attempts: 8
-  frontier-limit: 512
-  tree-chance: 0.02
+  # Отдельный бюджет восстановления за тик.
+  restore-per-tick: 80
 
-  # Общий предохранитель для журнала изменённых блоков.
-  max-recorded-blocks: 30000
+  # Сколько вертикальных колонок существующих чанков
+  # проверять за тик при поиске уже установленных факелов.
+  light-scan-columns-per-tick: 8
 
-rollback:
-  # Восстановление небольшими порциями.
-  blocks-per-step: 80
-
-mobs:
-  infection-chance: 0.10
-  max-loaded-infected: 40
+  # Сколько чанков просматривать за попытку найти фронт роста.
+  frontier-chunks-per-search: 24
 
 defence:
-  detection-radius: 16
-  wave-size: 2
-  spawn-radius: 5
+  # Площадь, необходимая для усиления.
+  # Уровень = целая часть sqrt(площадь / area-step).
+  area-step: 512
 
-  types:
-    - ZOMBIE
-    - SKELETON
-    - SPIDER
-    - CREEPER
-    - ZOMBIE_VILLAGER
+  base-guards: 2
+  guards-per-level: 2
+  wave-cooldown-seconds: 12
+
+  # Техническая защита от чрезмерного количества
+  # одновременно существующих сущностей у одного сердца.
+  max-loaded-guards-per-heart: 24
+
+decorations:
+  sculk-block-chance: 0.18
+  tentacle-chance: 0.025
+  pale-tree-chance: 0.035
 
 hallucinations:
   sounds: true
@@ -43,9 +47,22 @@ hallucinations:
   damage-per-second: 1.0
   recovery-per-second: 3
 
-models:
-  # true — создать простые демонстрационные модели,
-  # но только если соответствующих файлов ещё нет.
-  generate-examples: true
+mobs:
+  infection-chance-per-second: 0.25
+  attack-multiplier: 1.5
+  villager-aura-damage: 1.0
+  villager-aura-radius: 2.2
+  health-multiplier: 1.3
 
-  max-cubes: 24
+rollback:
+  # true: не перезаписывать блок, если игрок заменил его
+  # на материал, отличный от записанного заражённого материала.
+  respect-player-changes: true
+
+models:
+  enabled: true
+  scale: 1.0
+
+  # Защита от случайно загруженной чрезвычайно тяжёлой модели.
+  max-cubes-per-model: 128
+
