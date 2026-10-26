@@ -32,6 +32,13 @@ final class InfectionData implements AutoCloseable {
         SCULK,
         PALE;
 
+        String folder() {
+            return switch (this) {
+                case SCULK -> "sculk";
+                case PALE -> "pale";
+            };
+        }
+
         Material ground() {
             return this == SCULK
                     ? Material.SCULK
@@ -521,7 +528,7 @@ final class InfectionData implements AutoCloseable {
             tile = previous.tile();
         }
 
-        // Record the original state before changing the world.
+        // Исходное состояние записывается до изменения блока.
         exec("""
                 INSERT INTO cells(
                     w,x,y,z,h,cx,cz,old,next,tile,role
@@ -573,7 +580,7 @@ final class InfectionData implements AutoCloseable {
 
                 if (!file.isFile()) {
                     throw new IllegalStateException(
-                            "Missing rollback snapshot: "
+                            "Не найден снимок для отката: "
                                     + file.getName()
                     );
                 }
@@ -583,7 +590,7 @@ final class InfectionData implements AutoCloseable {
 
                 if (snapshot == null) {
                     throw new IllegalStateException(
-                            "Cannot read rollback snapshot"
+                            "Не удалось прочитать снимок для отката"
                     );
                 }
 
@@ -628,8 +635,13 @@ final class InfectionData implements AutoCloseable {
         return ((Number) value).intValue();
     }
 
+    static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     @Override
     public void close() throws Exception {
         sql.close();
     }
 }
+
