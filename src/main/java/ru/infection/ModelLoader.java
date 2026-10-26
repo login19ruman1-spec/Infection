@@ -121,7 +121,7 @@ final class ModelLoader {
                             d.setDisplayHeight(4);
 
                             d.getPersistentDataContainer().set(
-                                    plugin.displayKey,
+                                    plugin.visualEntityKey,
                                     org.bukkit.persistence
                                             .PersistentDataType.BYTE,
                                     (byte) 1
