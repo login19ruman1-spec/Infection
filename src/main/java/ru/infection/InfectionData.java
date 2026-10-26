@@ -232,7 +232,7 @@ final class InfectionData implements AutoCloseable {
                      sql.prepareStatement(query)) {
 
             bind(statement, args);
-            statement.executeUpdate();
+            statement.execute();
         }
     }
 
