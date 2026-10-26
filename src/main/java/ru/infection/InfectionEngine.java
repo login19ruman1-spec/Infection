@@ -872,96 +872,98 @@ final class InfectionEngine {
             return List.of();
         }
 
-        // Не позволять генератору дерева незаметно загрузить соседние чанки.
-        for (int x = column.x() - 16; x <= column.x() + 16; x += 16) {
-            for (int z = column.z() - 16; z <= column.z() + 16; z += 16) {
-                if (!world.isChunkLoaded(x >> 4, z >> 4)) {
-                    return List.of();
+        int baseX = column.x();
+        int baseY = column.y() + 1;
+        int baseZ = column.z();
+
+        // Ствол занимает уровни 0..6, крона — 4..7.
+        if (baseY < world.getMinHeight()
+                || baseY + 7 >= world.getMaxHeight()) {
+            return List.of();
+        }
+
+        // Дерево строится вручную, без world.generateTree().
+        // Сначала формируем план, не меняя мир.
+        Map<Pos, BlockData> blocks = new LinkedHashMap<>();
+
+        BlockData log = Bukkit.createBlockData(
+                "minecraft:pale_oak_log[axis=y]"
+        );
+
+        BlockData leaves = Bukkit.createBlockData(
+                "minecraft:pale_oak_leaves[persistent=true]"
+        );
+
+        // Непрерывный вертикальный ствол.
+        for (int dy = 0; dy <= 6; dy++) {
+            Pos pos = new Pos(
+                    heart.world,
+                    baseX,
+                    baseY + dy,
+                    baseZ
+            );
+
+            blocks.put(pos, log.clone());
+        }
+
+        // Простая крона бледного дуба.
+        for (int dy = 4; dy <= 7; dy++) {
+            int radius = dy == 7 ? 1 : 2;
+
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    // Не заменяем ствол листьями.
+                    if (dx == 0 && dz == 0 && dy <= 6) {
+                        continue;
+                    }
+
+                    // Убираем крайние углы широкой кроны.
+                    if (radius == 2
+                            && Math.abs(dx) == radius
+                            && Math.abs(dz) == radius) {
+                        continue;
+                    }
+
+                    Pos pos = new Pos(
+                            heart.world,
+                            baseX + dx,
+                            baseY + dy,
+                            baseZ + dz
+                    );
+
+                    blocks.put(pos, leaves.clone());
                 }
             }
         }
 
-        Map<Pos, BlockData> captured = new LinkedHashMap<>();
+        // Проверяем весь план до добавления задания.
+        // Не загружаем чанки и не заменяем существующие постройки.
+        for (Pos pos : blocks.keySet()) {
+            Block existing = pos.loadedBlock();
 
-        Predicate<BlockState> capture = state -> {
-            captured.put(
-                    Pos.of(state.getBlock()),
-                    state.getBlockData().clone()
-            );
-
-            // Генератор ничего не ставит напрямую:
-            // все изменения пройдут через наш журнал.
-            return false;
-        };
-
-        world.generateTree(
-                new Location(
-                        world,
-                        column.x(), column.y() + 1, column.z()
-                ),
-                random,
-                org.bukkit.TreeType.PALE_OAK,
-                capture
-        );
-
-        if (captured.isEmpty()) {
-            return List.of();
-        }
-
-        // Гарантировать сердце внутри непрерывного вертикального ствола.
-        Pos core = null;
-
-        for (Map.Entry<Pos, BlockData> entry : captured.entrySet()) {
-            Pos pos = entry.getKey();
-
-            if (entry.getValue().getMaterial() != Material.PALE_OAK_LOG) {
-                continue;
-            }
-
-            Pos below = new Pos(
-                    pos.world(), pos.x(), pos.y() - 1, pos.z()
-            );
-
-            Pos above = new Pos(
-                    pos.world(), pos.x(), pos.y() + 1, pos.z()
-            );
-
-            if (captured.containsKey(below)
-                    && captured.containsKey(above)
-                    && captured.get(below).getMaterial()
-                        == Material.PALE_OAK_LOG
-                    && captured.get(above).getMaterial()
-                        == Material.PALE_OAK_LOG) {
-                core = pos;
-                break;
+            if (existing == null || !existing.getType().isAir()) {
+                return List.of();
             }
         }
 
-        if (core == null) {
-            return List.of();
-        }
-
-        Pos below = new Pos(
-                core.world(), core.x(), core.y() - 1, core.z()
+        // Сердце скрипуна внутри ствола.
+        // Над ним и под ним остаются вертикальные брёвна.
+        Pos core = new Pos(
+                heart.world,
+                baseX,
+                baseY + 2,
+                baseZ
         );
 
-        Pos above = new Pos(
-                core.world(), core.x(), core.y() + 1, core.z()
-        );
-
-        BlockData verticalLog = Bukkit.createBlockData(
-                "minecraft:pale_oak_log[axis=y]"
-        );
-
-        captured.put(below, verticalLog.clone());
-        captured.put(above, verticalLog.clone());
-        captured.remove(core);
+        blocks.remove(core);
 
         List<Change> plan = new ArrayList<>();
 
-        for (Map.Entry<Pos, BlockData> entry : captured.entrySet()) {
+        for (Map.Entry<Pos, BlockData> entry : blocks.entrySet()) {
             plan.add(new Change(
-                    entry.getKey(), entry.getValue(), "tree"
+                    entry.getKey(),
+                    entry.getValue(),
+                    "tree"
             ));
         }
 
@@ -972,7 +974,7 @@ final class InfectionEngine {
         creaking.setNatural(true);
         creaking.setActive(true);
 
-        // Сердце ставится последним, когда оба бревна уже существуют.
+        // Сердце ставится последним, после окружающих брёвен.
         plan.add(new Change(core, creaking, "tree"));
 
         return plan;
