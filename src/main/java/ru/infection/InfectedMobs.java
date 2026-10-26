@@ -1,558 +1,147 @@
 package ru.infection;
 
-import com.google.gson.Gson;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Particle;
+import org.bukkit.SoundCategory;
 import org.bukkit.World;
-import org.bukkit.block.Block;
-import org.bukkit.block.TileState;
-import org.bukkit.block.data.BlockData;
-import org.bukkit.block.structure.Mirror;
-import org.bukkit.block.structure.StructureRotation;
-import org.bukkit.structure.Structure;
-import org.bukkit.util.BlockVector;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.Mob;
+import org.bukkit.entity.Player;
+import org.bukkit.entity.Villager;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
 
-import java.io.File;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 
-final class InfectionData implements AutoCloseable {
-    enum Kind {
-        SCULK, PALE;
+import static ru.infection.InfectionData.*;
 
-        Material ground() {
-            return this == SCULK
-                    ? Material.SCULK
-                    : Material.PALE_MOSS_BLOCK;
-        }
-
-        Material core() {
-            return this == SCULK
-                    ? Material.SCULK_CATALYST
-                    : Material.RESIN_BLOCK;
-        }
-    }
-
-    record Pos(UUID world, int x, int y, int z) {
-        static Pos of(Block b) {
-            return new Pos(
-                    b.getWorld().getUID(),
-                    b.getX(), b.getY(), b.getZ()
-            );
-        }
-
-        World worldObject() {
-            return Bukkit.getWorld(world);
-        }
-
-        Block loadedBlock() {
-            World w = worldObject();
-
-            if (w == null
-                    || y < w.getMinHeight()
-                    || y >= w.getMaxHeight()
-                    || !w.isChunkLoaded(x >> 4, z >> 4)) {
-                return null;
-            }
-
-            return w.getBlockAt(x, y, z);
-        }
-
-        Location location() {
-            World w = worldObject();
-
-            return w == null
-                    ? null
-                    : new Location(w, x + 0.5, y, z + 0.5);
-        }
-    }
-
-    static final class Heart {
-        UUID id;
-        UUID world;
-        Kind kind;
-
-        int x;
-        int y;
-        int z;
-        int ground;
-
-        int depth;
-        int speed;
-        int damage;
-        int stage;
-        int vein;
-
-        boolean defence;
-        boolean active = true;
-
-        Pos core() {
-            return new Pos(world, x, y, z);
-        }
-
-        Location location() {
-            return core().location();
-        }
-    }
-
-    record Cell(
-            long id,
-            UUID heart,
-            Pos pos,
-            String before,
-            String after,
-            String tile,
-            String role
-    ) {}
-
-    record Column(int x, int z, int y) {}
-
+final class InfectedMobs {
     private final InfectionPlugin plugin;
-    private final Gson gson = new Gson();
-    private final Connection sql;
-    private final File tiles;
+    private final InfectionData data;
+    private final InfectionEngine engine;
 
-    final Map<UUID, Heart> hearts = new LinkedHashMap<>();
+    final NamespacedKey heartKey;
+    final NamespacedKey kindKey;
+    final NamespacedKey guardKey;
 
-    InfectionData(InfectionPlugin plugin) throws Exception {
+    private final NamespacedKey aiKey;
+    private final NamespacedKey gravityKey;
+    private final NamespacedKey invulnerableKey;
+    private final NamespacedKey healthKey;
+
+    private final Set<EntityType> supported = Set.of(
+            EntityType.ZOMBIE,
+            EntityType.SKELETON,
+            EntityType.SPIDER,
+            EntityType.CREEPER,
+            EntityType.VILLAGER,
+            EntityType.ZOMBIE_VILLAGER
+    );
+
+    private final Map<UUID, Long> wave = new HashMap<>();
+    private final Map<UUID, Exposure> exposure = new HashMap<>();
+
+    final Map<UUID, Kind> deathReason = new HashMap<>();
+
+    static final class Exposure {
+        UUID heart;
+        int seconds;
+    }
+
+    InfectedMobs(InfectionPlugin plugin) {
         this.plugin = plugin;
+        data = plugin.data;
+        engine = plugin.engine;
 
-        plugin.getDataFolder().mkdirs();
+        heartKey = new NamespacedKey(plugin, "infected_heart");
+        kindKey = new NamespacedKey(plugin, "infected_kind");
+        guardKey = new NamespacedKey(plugin, "guard");
 
-        tiles = new File(plugin.getDataFolder(), "tiles");
-        tiles.mkdirs();
-
-        Class.forName("org.sqlite.JDBC");
-
-        File database = new File(
-                plugin.getDataFolder(), "infection.db"
-        );
-
-        sql = DriverManager.getConnection(
-                "jdbc:sqlite:" + database.getAbsolutePath()
-        );
-
-        exec("PRAGMA journal_mode=WAL");
-        exec("PRAGMA synchronous=NORMAL");
-        exec("PRAGMA busy_timeout=5000");
-
-        exec("""
-                CREATE TABLE IF NOT EXISTS hearts (
-                    id TEXT PRIMARY KEY,
-                    json TEXT NOT NULL
-                )
-                """);
-
-        exec("""
-                CREATE TABLE IF NOT EXISTS cells (
-                    w TEXT NOT NULL,
-                    x INTEGER NOT NULL,
-                    y INTEGER NOT NULL,
-                    z INTEGER NOT NULL,
-                    h TEXT NOT NULL,
-                    cx INTEGER NOT NULL,
-                    cz INTEGER NOT NULL,
-                    old TEXT NOT NULL,
-                    next TEXT NOT NULL,
-                    tile TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    PRIMARY KEY(w,x,y,z)
-                )
-                """);
-
-        exec("""
-                CREATE INDEX IF NOT EXISTS cells_heart
-                ON cells(h)
-                """);
-
-        exec("""
-                CREATE INDEX IF NOT EXISTS cells_chunk
-                ON cells(w,cx,cz)
-                """);
-
-        exec("""
-                CREATE TABLE IF NOT EXISTS columns (
-                    h TEXT NOT NULL,
-                    x INTEGER NOT NULL,
-                    z INTEGER NOT NULL,
-                    y INTEGER NOT NULL,
-                    cx INTEGER NOT NULL,
-                    cz INTEGER NOT NULL,
-                    done INTEGER NOT NULL DEFAULT 0,
-                    due INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(h,x,z)
-                )
-                """);
-
-        exec("""
-                CREATE INDEX IF NOT EXISTS columns_front
-                ON columns(h,cx,cz,done,due)
-                """);
-
-        for (Object[] row : rows("SELECT json FROM hearts")) {
-            Heart heart = gson.fromJson(
-                    row[0].toString(), Heart.class
-            );
-
-            hearts.put(heart.id, heart);
-        }
+        aiKey = new NamespacedKey(plugin, "original_ai");
+        gravityKey = new NamespacedKey(plugin, "original_gravity");
+        invulnerableKey = new NamespacedKey(plugin, "original_invulnerable");
+        healthKey = new NamespacedKey(plugin, "original_max_health");
     }
 
-    void exec(String query, Object... args) throws Exception {
-        try (PreparedStatement s = sql.prepareStatement(query)) {
-            bind(s, args);
-            s.executeUpdate();
-        }
-    }
-
-    List<Object[]> rows(String query, Object... args)
-            throws Exception {
-
-        List<Object[]> result = new ArrayList<>();
-
-        try (PreparedStatement s = sql.prepareStatement(query)) {
-            bind(s, args);
-
-            try (ResultSet r = s.executeQuery()) {
-                ResultSetMetaData metadata = r.getMetaData();
-                int size = metadata.getColumnCount();
-
-                while (r.next()) {
-                    Object[] row = new Object[size];
-
-                    for (int i = 0; i < size; i++) {
-                        row[i] = r.getObject(i + 1);
-                    }
-
-                    result.add(row);
-                }
-            }
-        }
-
-        return result;
-    }
-
-    private void bind(PreparedStatement statement, Object[] args)
-            throws Exception {
-
-        for (int i = 0; i < args.length; i++) {
-            Object value = args[i];
-
-            statement.setObject(
-                    i + 1,
-                    value instanceof UUID
-                            ? value.toString()
-                            : value
-            );
-        }
-    }
-
-    void save(Heart heart) throws Exception {
-        exec(
-                "INSERT OR REPLACE INTO hearts(id,json) VALUES(?,?)",
-                heart.id, gson.toJson(heart)
-        );
-
-        hearts.put(heart.id, heart);
-    }
-
-    void remove(Heart heart) throws Exception {
-        heart.active = false;
-        save(heart);
-
-        exec("DELETE FROM columns WHERE h=?", heart.id);
-    }
-
-    void finishRemoved(Heart heart) throws Exception {
-        if (heart.active) {
-            return;
-        }
-
-        if (!rows(
-                "SELECT 1 FROM cells WHERE h=? LIMIT 1",
-                heart.id
-        ).isEmpty()) {
-            return;
-        }
-
-        exec("DELETE FROM hearts WHERE id=?", heart.id);
-        hearts.remove(heart.id);
-    }
-
-    void seed(Heart heart, int x, int z, int y)
-            throws Exception {
-
-        exec("""
-                INSERT OR IGNORE INTO columns(h,x,z,y,cx,cz)
-                VALUES(?,?,?,?,?,?)
-                """,
-                heart.id, x, z, y, x >> 4, z >> 4
+    boolean infected(Entity entity) {
+        return entity.getPersistentDataContainer().has(
+                heartKey, PersistentDataType.STRING
         );
     }
 
-    Column pending(Heart heart, int cx, int cz)
-            throws Exception {
+    boolean guard(Entity entity) {
+        return entity.getPersistentDataContainer().has(
+                guardKey, PersistentDataType.BYTE
+        );
+    }
 
-        List<Object[]> found = rows("""
-                SELECT x,z,y FROM columns
-                WHERE h=? AND cx=? AND cz=?
-                  AND done=0 AND due<=?
-                LIMIT 1
-                """,
-                heart.id, cx, cz, System.currentTimeMillis()
+    Heart heart(Entity entity) {
+        String value = entity.getPersistentDataContainer().get(
+                heartKey, PersistentDataType.STRING
         );
 
-        if (found.isEmpty()) {
+        if (value == null) {
             return null;
         }
 
-        Object[] row = found.getFirst();
-
-        return new Column(
-                number(row[0]),
-                number(row[1]),
-                number(row[2])
-        );
-    }
-
-    void columnDone(Heart heart, Column c) throws Exception {
-        exec("""
-                UPDATE columns SET done=1,due=0
-                WHERE h=? AND x=? AND z=?
-                """, heart.id, c.x(), c.z()
-        );
-    }
-
-    void postpone(Heart heart, Column c) throws Exception {
-        exec("""
-                UPDATE columns SET due=?
-                WHERE h=? AND x=? AND z=?
-                """,
-                System.currentTimeMillis() + 2000,
-                heart.id, c.x(), c.z()
-        );
-    }
-
-    long area(Heart heart) throws Exception {
-        return ((Number) rows(
-                "SELECT COUNT(*) FROM columns WHERE h=? AND done=1",
-                heart.id
-        ).getFirst()[0]).longValue();
-    }
-
-    Heart owner(Location location) throws Exception {
-        List<Object[]> result = rows("""
-                SELECT h,y FROM columns
-                WHERE x=? AND z=? AND done=1
-                """,
-                location.getBlockX(), location.getBlockZ()
-        );
-
-        for (Object[] row : result) {
-            Heart h = hearts.get(UUID.fromString(row[0].toString()));
-
-            if (h == null || !h.active
-                    || !h.world.equals(location.getWorld().getUID())) {
-                continue;
-            }
-
-            int top = number(row[1]);
-            int y = location.getBlockY();
-
-            if (y >= top - h.depth && y <= top + 18) {
-                return h;
-            }
+        try {
+            return data.hearts.get(UUID.fromString(value));
+        } catch (IllegalArgumentException ignored) {
+            return null;
         }
-
-        return null;
     }
 
-    Cell cell(Block block) throws Exception {
-        List<Cell> result = cells("""
-                SELECT rowid,* FROM cells
-                WHERE w=? AND x=? AND y=? AND z=?
-                """,
-                block.getWorld().getUID(),
-                block.getX(), block.getY(), block.getZ()
+    Kind kind(Entity entity) {
+        String value = entity.getPersistentDataContainer().get(
+                kindKey, PersistentDataType.STRING
         );
 
-        return result.isEmpty() ? null : result.getFirst();
-    }
-
-    List<Cell> cells(String query, Object... args)
-            throws Exception {
-
-        List<Cell> result = new ArrayList<>();
-
-        for (Object[] row : rows(query, args)) {
-            result.add(new Cell(
-                    ((Number) row[0]).longValue(),
-                    UUID.fromString(row[5].toString()),
-                    new Pos(
-                            UUID.fromString(row[1].toString()),
-                            number(row[2]),
-                            number(row[3]),
-                            number(row[4])
-                    ),
-                    row[8].toString(),
-                    row[9].toString(),
-                    row[10].toString(),
-                    row[11].toString()
-            ));
+        try {
+            return value == null ? null : Kind.valueOf(value);
+        } catch (IllegalArgumentException ignored) {
+            return null;
         }
-
-        return result;
     }
 
-    boolean replace(
-            Heart heart,
-            Block block,
-            BlockData next,
-            String role
-    ) throws Exception {
+    boolean frozen(Entity entity) {
+        Kind kind = kind(entity);
 
-        Cell previous = cell(block);
-
-        if (previous != null
-                && !previous.heart().equals(heart.id)) {
-            return false;
-        }
-
-        String before;
-        String tile;
-
-        if (previous == null) {
-            before = block.getBlockData().getAsString();
-            tile = "";
-
-            if (block.getState() instanceof TileState) {
-                tile = UUID.randomUUID() + ".nbt";
-
-                Structure snapshot = Bukkit.getStructureManager()
-                        .createStructure();
-
-                snapshot.fill(
-                        block.getLocation(),
-                        new BlockVector(1, 1, 1),
-                        false
-                );
-
-                Bukkit.getStructureManager().saveStructure(
-                        new File(tiles, tile), snapshot
-                );
-            }
-        } else {
-            before = previous.before();
-            tile = previous.tile();
-        }
-
-        // Запись на диск выполняется до изменения мира.
-        exec("""
-                INSERT INTO cells(
-                    w,x,y,z,h,cx,cz,old,next,tile,role
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(w,x,y,z) DO UPDATE SET
-                    next=excluded.next,
-                    role=excluded.role
-                """,
-                block.getWorld().getUID(),
-                block.getX(), block.getY(), block.getZ(),
-                heart.id,
-                block.getX() >> 4, block.getZ() >> 4,
-                before, next.getAsString(), tile, role
-        );
-
-        block.setBlockData(next, false);
-        return true;
+        return infected(entity)
+                && kind == Kind.PALE
+                && !night(entity.getWorld());
     }
 
-    boolean restore(Cell cell) throws Exception {
-        Block block = cell.pos().loadedBlock();
-
-        if (block == null) {
-            return false;
-        }
-
-        Material expected = Bukkit.createBlockData(cell.after())
-                .getMaterial();
-
-        boolean respect = plugin.getConfig().getBoolean(
-                "rollback.respect-player-changes", true
-        );
-
-        if (!respect || block.getType() == expected) {
-            if (cell.tile().isEmpty()) {
-                block.setBlockData(
-                        Bukkit.createBlockData(cell.before()), false
-                );
-            } else {
-                File file = new File(tiles, cell.tile());
-
-                if (!file.isFile()) {
-                    throw new IllegalStateException(
-                            "Missing rollback snapshot: " + file.getName()
-                    );
-                }
-
-                Structure snapshot = Bukkit.getStructureManager()
-                        .loadStructure(file);
-
-                if (snapshot == null) {
-                    throw new IllegalStateException(
-                            "Cannot read rollback snapshot"
-                    );
-                }
-
-                snapshot.place(
-                        block.getLocation(),
-                        false,
-                        StructureRotation.NONE,
-                        Mirror.NONE,
-                        -1,
-                        1.0f,
-                        new Random()
-                );
-            }
-        }
-
-        exec("DELETE FROM cells WHERE rowid=?", cell.id());
-
-        if (!cell.tile().isEmpty()) {
-            new File(tiles, cell.tile()).delete();
-        }
-
-        return true;
+    static boolean night(World world) {
+        long time = world.getTime();
+        return time >= 13000 && time < 23000;
     }
 
-    void reopenSurface(Cell cell) throws Exception {
-        exec("""
-                UPDATE columns SET done=0,due=?
-                WHERE h=? AND x=? AND z=? AND y=?
-                """,
-                System.currentTimeMillis() + 2000,
-                cell.heart(),
-                cell.pos().x(),
-                cell.pos().z(),
-                cell.pos().y()
-        );
+    static boolean vulnerable(Player player) {
+        return player.getGameMode() == GameMode.SURVIVAL
+                || player.getGameMode() == GameMode.ADVENTURE;
     }
 
-    static int number(Object value) {
-        return ((Number) value).intValue();
-    }
-
-    @Override
-    public void close() throws Exception {
-        sql.close();
-    }
-}
+    private void flag(
+            PersistentDataContainer container,
+            NamespacedKey key,
+            boolean value
+    ) {
+        container.set(
+                key,
+                PersistentDataType.BYTE,
+                (byte) (
