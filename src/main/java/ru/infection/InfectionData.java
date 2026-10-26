@@ -1,26 +1,36 @@
 package ru.infection;
 
-import org.bukkit.*;
+import com.google.gson.Gson;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.TileState;
 import org.bukkit.block.data.BlockData;
-import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.block.structure.Mirror;
+import org.bukkit.block.structure.StructureRotation;
+import org.bukkit.structure.Structure;
+import org.bukkit.util.BlockVector;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.*;
+import java.io.File;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.UUID;
 
-final class InfectionData {
+final class InfectionData implements AutoCloseable {
 
     enum Kind {
-        SCULK, PALE;
-
-        Material core() {
-            return this == SCULK
-                    ? Material.SCULK_CATALYST
-                    : Material.CREAKING_HEART;
-        }
+        SCULK,
+        PALE;
 
         Material ground() {
             return this == SCULK
@@ -28,12 +38,10 @@ final class InfectionData {
                     : Material.PALE_MOSS_BLOCK;
         }
 
-        String title() {
-            return this == SCULK ? "Скалк" : "Бледный мох";
-        }
-
-        String folder() {
-            return name().toLowerCase(Locale.ROOT);
+        Material core() {
+            return this == SCULK
+                    ? Material.SCULK_CATALYST
+                    : Material.RESIN_BLOCK;
         }
     }
 
@@ -48,388 +56,580 @@ final class InfectionData {
             );
         }
 
-        Block loadedBlock() {
-            World w = Bukkit.getWorld(world);
+        World worldObject() {
+            return Bukkit.getWorld(world);
+        }
 
-            if (w == null
-                    || y < w.getMinHeight()
-                    || y >= w.getMaxHeight()
-                    || !w.isChunkLoaded(x >> 4, z >> 4)) {
+        Block loadedBlock() {
+            World worldObject = worldObject();
+
+            if (worldObject == null
+                    || y < worldObject.getMinHeight()
+                    || y >= worldObject.getMaxHeight()
+                    || !worldObject.isChunkLoaded(x >> 4, z >> 4)) {
                 return null;
             }
 
-            return w.getBlockAt(x, y, z);
+            return worldObject.getBlockAt(x, y, z);
         }
 
         Location location() {
-            World w = Bukkit.getWorld(world);
-            return w == null ? null : new Location(w, x, y, z);
-        }
+            World worldObject = worldObject();
 
-        String key() {
-            return world + "," + x + "," + y + "," + z;
-        }
-
-        static Pos parse(String text) {
-            String[] parts = text.split(",");
-
-            if (parts.length != 4) {
-                throw new IllegalArgumentException(
-                        "Некорректная позиция блока"
-                );
-            }
-
-            return new Pos(
-                    UUID.fromString(parts[0]),
-                    Integer.parseInt(parts[1]),
-                    Integer.parseInt(parts[2]),
-                    Integer.parseInt(parts[3])
-            );
+            return worldObject == null
+                    ? null
+                    : new Location(
+                            worldObject,
+                            x + 0.5,
+                            y,
+                            z + 0.5
+                    );
         }
     }
 
     static final class Heart {
         UUID id;
+        UUID world;
         Kind kind;
-        Pos pos;
 
-        int radius;
-        int spreadSeconds;
-        int damageAfter;
+        int x;
+        int y;
+        int z;
+        int ground;
+
+        int depth;
+        int speed;
+        int damage;
+        int stage;
+        int vein;
 
         boolean defence;
-        int guardLimit;
-        int cooldown;
+        boolean active = true;
 
-        // Временные данные: не требуют сохранения.
-        long nextWave;
-        final List<Pos> frontier = new ArrayList<>();
+        Pos core() {
+            return new Pos(world, x, y, z);
+        }
 
-        boolean contains(Location location) {
-            Location centre = pos.location();
-
-            return centre != null
-                    && centre.getWorld().equals(location.getWorld())
-                    && centre.distanceSquared(location)
-                    <= (double) radius * radius;
+        Location location() {
+            return core().location();
         }
     }
 
-    record Edit(UUID owner, String before, String after) {}
+    record Cell(
+            long id,
+            UUID heart,
+            Pos pos,
+            String before,
+            String after,
+            String tile,
+            String role
+    ) {}
+
+    record Column(int x, int z, int y) {}
+
+    private final InfectionPlugin plugin;
+    private final Gson gson = new Gson();
+    private final Connection sql;
+    private final File tiles;
 
     final Map<UUID, Heart> hearts = new LinkedHashMap<>();
-    final Map<Pos, Edit> edits = new LinkedHashMap<>();
 
-    private final ArrayDeque<Pos> rollbackQueue =
-            new ArrayDeque<>();
+    InfectionData(InfectionPlugin plugin) throws Exception {
+        this.plugin = plugin;
 
-    private final Path file;
+        plugin.getDataFolder().mkdirs();
 
-    InfectionData(Path file) throws Exception {
-        this.file = file;
-        load();
+        tiles = new File(plugin.getDataFolder(), "tiles");
+        tiles.mkdirs();
+
+        Class.forName("org.sqlite.JDBC");
+
+        File database = new File(
+                plugin.getDataFolder(),
+                "infection.db"
+        );
+
+        sql = DriverManager.getConnection(
+                "jdbc:sqlite:" + database.getAbsolutePath()
+        );
+
+        exec("PRAGMA journal_mode=WAL");
+        exec("PRAGMA synchronous=NORMAL");
+        exec("PRAGMA busy_timeout=5000");
+
+        exec("""
+                CREATE TABLE IF NOT EXISTS hearts (
+                    id TEXT PRIMARY KEY,
+                    json TEXT NOT NULL
+                )
+                """);
+
+        exec("""
+                CREATE TABLE IF NOT EXISTS cells (
+                    w TEXT NOT NULL,
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    h TEXT NOT NULL,
+                    cx INTEGER NOT NULL,
+                    cz INTEGER NOT NULL,
+                    old TEXT NOT NULL,
+                    next TEXT NOT NULL,
+                    tile TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    PRIMARY KEY(w,x,y,z)
+                )
+                """);
+
+        exec("""
+                CREATE INDEX IF NOT EXISTS cells_heart
+                ON cells(h)
+                """);
+
+        exec("""
+                CREATE INDEX IF NOT EXISTS cells_chunk
+                ON cells(w,cx,cz)
+                """);
+
+        exec("""
+                CREATE TABLE IF NOT EXISTS columns (
+                    h TEXT NOT NULL,
+                    x INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    cx INTEGER NOT NULL,
+                    cz INTEGER NOT NULL,
+                    done INTEGER NOT NULL DEFAULT 0,
+                    due INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(h,x,z)
+                )
+                """);
+
+        exec("""
+                CREATE INDEX IF NOT EXISTS columns_front
+                ON columns(h,cx,cz,done,due)
+                """);
+
+        for (Object[] row : rows("SELECT json FROM hearts")) {
+            Heart heart = gson.fromJson(
+                    row[0].toString(),
+                    Heart.class
+            );
+
+            hearts.put(heart.id, heart);
+        }
     }
 
-    boolean canEdit(Heart heart, Block block) {
-        Edit edit = edits.get(Pos.of(block));
+    void exec(String query, Object... args) throws Exception {
+        try (PreparedStatement statement =
+                     sql.prepareStatement(query)) {
 
-        return edit == null
-                || (edit.owner().equals(heart.id)
-                && edit.after().equals(
-                        block.getBlockData().getAsString()
-                ));
+            bind(statement, args);
+            statement.executeUpdate();
+        }
     }
 
-    /*
-     * Сначала сохраняем журнал, затем изменяем мир.
-     * Используется только для блоков без содержимого:
-     * земля, камень, воздух, листья, древесина и заражение.
-     */
-    boolean apply(Heart heart, Map<Block, BlockData> batch,
-                  int maximumRecords) throws IOException {
+    List<Object[]> rows(String query, Object... args)
+            throws Exception {
 
-        if (batch.isEmpty()) {
-            return true;
+        List<Object[]> result = new ArrayList<>();
+
+        try (PreparedStatement statement =
+                     sql.prepareStatement(query)) {
+
+            bind(statement, args);
+
+            try (ResultSet rows = statement.executeQuery()) {
+                ResultSetMetaData metadata = rows.getMetaData();
+                int size = metadata.getColumnCount();
+
+                while (rows.next()) {
+                    Object[] row = new Object[size];
+
+                    for (int i = 0; i < size; i++) {
+                        row[i] = rows.getObject(i + 1);
+                    }
+
+                    result.add(row);
+                }
+            }
         }
 
-        Map<Pos, Edit> next = new LinkedHashMap<>(edits);
+        return result;
+    }
 
-        for (var entry : batch.entrySet()) {
-            Block block = entry.getKey();
-            Pos pos = Pos.of(block);
+    private void bind(
+            PreparedStatement statement,
+            Object[] args
+    ) throws Exception {
 
-            if (pos.loadedBlock() == null
-                    || !heart.contains(block.getLocation())
-                    || !canEdit(heart, block)) {
-                return false;
+        for (int i = 0; i < args.length; i++) {
+            Object value = args[i];
+
+            statement.setObject(
+                    i + 1,
+                    value instanceof UUID
+                            ? value.toString()
+                            : value
+            );
+        }
+    }
+
+    void save(Heart heart) throws Exception {
+        exec(
+                "INSERT OR REPLACE INTO hearts(id,json) VALUES(?,?)",
+                heart.id,
+                gson.toJson(heart)
+        );
+
+        hearts.put(heart.id, heart);
+    }
+
+    void remove(Heart heart) throws Exception {
+        heart.active = false;
+        save(heart);
+
+        exec(
+                "DELETE FROM columns WHERE h=?",
+                heart.id
+        );
+    }
+
+    void finishRemoved(Heart heart) throws Exception {
+        if (heart.active) {
+            return;
+        }
+
+        if (!rows(
+                "SELECT 1 FROM cells WHERE h=? LIMIT 1",
+                heart.id
+        ).isEmpty()) {
+            return;
+        }
+
+        exec(
+                "DELETE FROM hearts WHERE id=?",
+                heart.id
+        );
+
+        hearts.remove(heart.id);
+    }
+
+    void seed(
+            Heart heart,
+            int x,
+            int z,
+            int y
+    ) throws Exception {
+
+        exec("""
+                INSERT OR IGNORE INTO columns(h,x,z,y,cx,cz)
+                VALUES(?,?,?,?,?,?)
+                """,
+                heart.id,
+                x,
+                z,
+                y,
+                x >> 4,
+                z >> 4
+        );
+    }
+
+    Column pending(
+            Heart heart,
+            int cx,
+            int cz
+    ) throws Exception {
+
+        List<Object[]> found = rows("""
+                SELECT x,z,y FROM columns
+                WHERE h=? AND cx=? AND cz=?
+                  AND done=0 AND due<=?
+                LIMIT 1
+                """,
+                heart.id,
+                cx,
+                cz,
+                System.currentTimeMillis()
+        );
+
+        if (found.isEmpty()) {
+            return null;
+        }
+
+        Object[] row = found.getFirst();
+
+        return new Column(
+                number(row[0]),
+                number(row[1]),
+                number(row[2])
+        );
+    }
+
+    void columnDone(
+            Heart heart,
+            Column column
+    ) throws Exception {
+
+        exec("""
+                UPDATE columns SET done=1,due=0
+                WHERE h=? AND x=? AND z=?
+                """,
+                heart.id,
+                column.x(),
+                column.z()
+        );
+    }
+
+    void postpone(
+            Heart heart,
+            Column column
+    ) throws Exception {
+
+        exec("""
+                UPDATE columns SET due=?
+                WHERE h=? AND x=? AND z=?
+                """,
+                System.currentTimeMillis() + 2000,
+                heart.id,
+                column.x(),
+                column.z()
+        );
+    }
+
+    long area(Heart heart) throws Exception {
+        return ((Number) rows(
+                "SELECT COUNT(*) FROM columns WHERE h=? AND done=1",
+                heart.id
+        ).getFirst()[0]).longValue();
+    }
+
+    Heart owner(Location location) throws Exception {
+        List<Object[]> result = rows("""
+                SELECT h,y FROM columns
+                WHERE x=? AND z=? AND done=1
+                """,
+                location.getBlockX(),
+                location.getBlockZ()
+        );
+
+        for (Object[] row : result) {
+            Heart heart = hearts.get(
+                    UUID.fromString(row[0].toString())
+            );
+
+            if (heart == null
+                    || !heart.active
+                    || !heart.world.equals(
+                            location.getWorld().getUID()
+                    )) {
+                continue;
             }
 
-            Edit previous = edits.get(pos);
+            int top = number(row[1]);
+            int y = location.getBlockY();
 
-            String before = previous == null
-                    ? block.getBlockData().getAsString()
-                    : previous.before();
+            if (y >= top - heart.depth && y <= top + 18) {
+                return heart;
+            }
+        }
 
-            next.put(pos, new Edit(
-                    heart.id,
-                    before,
-                    entry.getValue().getAsString()
+        return null;
+    }
+
+    Cell cell(Block block) throws Exception {
+        List<Cell> result = cells("""
+                SELECT rowid,* FROM cells
+                WHERE w=? AND x=? AND y=? AND z=?
+                """,
+                block.getWorld().getUID(),
+                block.getX(),
+                block.getY(),
+                block.getZ()
+        );
+
+        return result.isEmpty()
+                ? null
+                : result.getFirst();
+    }
+
+    List<Cell> cells(String query, Object... args)
+            throws Exception {
+
+        List<Cell> result = new ArrayList<>();
+
+        for (Object[] row : rows(query, args)) {
+            result.add(new Cell(
+                    ((Number) row[0]).longValue(),
+                    UUID.fromString(row[5].toString()),
+                    new Pos(
+                            UUID.fromString(row[1].toString()),
+                            number(row[2]),
+                            number(row[3]),
+                            number(row[4])
+                    ),
+                    row[8].toString(),
+                    row[9].toString(),
+                    row[10].toString(),
+                    row[11].toString()
             ));
         }
 
-        if (next.size() > maximumRecords) {
+        return result;
+    }
+
+    boolean replace(
+            Heart heart,
+            Block block,
+            BlockData next,
+            String role
+    ) throws Exception {
+
+        Cell previous = cell(block);
+
+        if (previous != null
+                && !previous.heart().equals(heart.id)) {
             return false;
         }
 
-        write(next);
+        String before;
+        String tile;
 
-        edits.clear();
-        edits.putAll(next);
+        if (previous == null) {
+            before = block.getBlockData().getAsString();
+            tile = "";
 
-        for (var entry : batch.entrySet()) {
-            entry.getKey().setBlockData(
-                    entry.getValue().clone(), false
-            );
+            if (block.getState() instanceof TileState) {
+                tile = UUID.randomUUID() + ".nbt";
+
+                Structure snapshot = Bukkit.getStructureManager()
+                        .createStructure();
+
+                snapshot.fill(
+                        block.getLocation(),
+                        new BlockVector(1, 1, 1),
+                        false
+                );
+
+                Bukkit.getStructureManager().saveStructure(
+                        new File(tiles, tile),
+                        snapshot
+                );
+            }
+        } else {
+            before = previous.before();
+            tile = previous.tile();
+        }
+
+        // Record the original state before changing the world.
+        exec("""
+                INSERT INTO cells(
+                    w,x,y,z,h,cx,cz,old,next,tile,role
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(w,x,y,z) DO UPDATE SET
+                    next=excluded.next,
+                    role=excluded.role
+                """,
+                block.getWorld().getUID(),
+                block.getX(),
+                block.getY(),
+                block.getZ(),
+                heart.id,
+                block.getX() >> 4,
+                block.getZ() >> 4,
+                before,
+                next.getAsString(),
+                tile,
+                role
+        );
+
+        block.setBlockData(next, false);
+        return true;
+    }
+
+    boolean restore(Cell cell) throws Exception {
+        Block block = cell.pos().loadedBlock();
+
+        if (block == null) {
+            return false;
+        }
+
+        Material expected = Bukkit.createBlockData(cell.after())
+                .getMaterial();
+
+        boolean respect = plugin.getConfig().getBoolean(
+                "rollback.respect-player-changes",
+                true
+        );
+
+        if (!respect || block.getType() == expected) {
+            if (cell.tile().isEmpty()) {
+                block.setBlockData(
+                        Bukkit.createBlockData(cell.before()),
+                        false
+                );
+            } else {
+                File file = new File(tiles, cell.tile());
+
+                if (!file.isFile()) {
+                    throw new IllegalStateException(
+                            "Missing rollback snapshot: "
+                                    + file.getName()
+                    );
+                }
+
+                Structure snapshot = Bukkit.getStructureManager()
+                        .loadStructure(file);
+
+                if (snapshot == null) {
+                    throw new IllegalStateException(
+                            "Cannot read rollback snapshot"
+                    );
+                }
+
+                snapshot.place(
+                        block.getLocation(),
+                        false,
+                        StructureRotation.NONE,
+                        Mirror.NONE,
+                        -1,
+                        1.0f,
+                        new Random()
+                );
+            }
+        }
+
+        exec(
+                "DELETE FROM cells WHERE rowid=?",
+                cell.id()
+        );
+
+        if (!cell.tile().isEmpty()) {
+            new File(tiles, cell.tile()).delete();
         }
 
         return true;
     }
 
-    void save() throws IOException {
-        write(edits);
-    }
-
-    void removeHeart(UUID id) throws IOException {
-        Heart removed = hearts.remove(id);
-
-        if (removed == null) {
-            return;
-        }
-
-        try {
-            save();
-        } catch (IOException ex) {
-            hearts.put(id, removed);
-            throw ex;
-        }
-
-        rebuildRollbackQueue();
-    }
-
-    /*
-     * Сердца, которых больше нет, оставляют записи
-     * в очереди восстановления.
-     *
-     * Незагруженные чанки принудительно не загружаются.
-     */
-    void rollbackStep(int budget) throws IOException {
-        int checks = Math.min(
-                rollbackQueue.size(), budget * 4
+    void reopenSurface(Cell cell) throws Exception {
+        exec("""
+                UPDATE columns SET done=0,due=?
+                WHERE h=? AND x=? AND z=? AND y=?
+                """,
+                System.currentTimeMillis() + 2000,
+                cell.heart(),
+                cell.pos().x(),
+                cell.pos().z(),
+                cell.pos().y()
         );
-
-        List<Pos> completed = new ArrayList<>();
-
-        while (checks-- > 0 && completed.size() < budget) {
-            Pos pos = rollbackQueue.pollFirst();
-
-            if (pos == null) {
-                break;
-            }
-
-            Edit edit = edits.get(pos);
-
-            if (edit == null || hearts.containsKey(edit.owner())) {
-                continue;
-            }
-
-            Block block = pos.loadedBlock();
-
-            if (block == null) {
-                rollbackQueue.addLast(pos);
-                continue;
-            }
-
-            // Не затираем последующие изменения игроков.
-            if (block.getBlockData().getAsString()
-                    .equals(edit.after())) {
-                block.setBlockData(
-                        Bukkit.createBlockData(edit.before()),
-                        false
-                );
-            }
-
-            completed.add(pos);
-        }
-
-        if (!completed.isEmpty()) {
-            Map<Pos, Edit> next = new LinkedHashMap<>(edits);
-            completed.forEach(next::remove);
-
-            // Восстановление произошло до удаления записи.
-            // При обычном повторном запуске старую запись
-            // можно безопасно проверить ещё раз.
-            write(next);
-
-            edits.clear();
-            edits.putAll(next);
-        }
     }
 
-    private void rebuildRollbackQueue() {
-        rollbackQueue.clear();
-
-        for (var entry : edits.entrySet()) {
-            if (!hearts.containsKey(entry.getValue().owner())) {
-                rollbackQueue.addLast(entry.getKey());
-            }
-        }
+    static int number(Object value) {
+        return ((Number) value).intValue();
     }
 
-    private void load() throws Exception {
-        if (!Files.exists(file)) {
-            return;
-        }
-
-        YamlConfiguration yaml = new YamlConfiguration();
-        yaml.load(file.toFile());
-
-        ConfigurationSection heartSection =
-                yaml.getConfigurationSection("hearts");
-
-        if (heartSection != null) {
-            for (String key : heartSection.getKeys(false)) {
-                ConfigurationSection row =
-                        Objects.requireNonNull(
-                                heartSection.getConfigurationSection(key)
-                        );
-
-                Heart heart = new Heart();
-
-                heart.id = UUID.fromString(key);
-                heart.kind = Kind.valueOf(
-                        Objects.requireNonNull(row.getString("kind"))
-                );
-
-                heart.pos = Pos.parse(
-                        Objects.requireNonNull(row.getString("pos"))
-                );
-
-                heart.radius = clamp(
-                        row.getInt("radius", 32), 8, 128);
-                heart.spreadSeconds = clamp(
-                        row.getInt("spread", 3), 1, 60);
-                heart.damageAfter = clamp(
-                        row.getInt("danger", 90), 30, 600);
-
-                heart.defence = row.getBoolean("defence", true);
-                heart.guardLimit = clamp(
-                        row.getInt("guards", 6), 0, 30);
-                heart.cooldown = clamp(
-                        row.getInt("cooldown", 20), 5, 120);
-
-                heart.frontier.add(new Pos(
-                        heart.pos.world(),
-                        heart.pos.x(),
-                        heart.pos.y() - 1,
-                        heart.pos.z()
-                ));
-
-                hearts.put(heart.id, heart);
-            }
-        }
-
-        ConfigurationSection blockSection =
-                yaml.getConfigurationSection("blocks");
-
-        if (blockSection != null) {
-            for (String key : blockSection.getKeys(false)) {
-                ConfigurationSection row =
-                        Objects.requireNonNull(
-                                blockSection.getConfigurationSection(key)
-                        );
-
-                Pos pos = Pos.parse(key);
-
-                Edit edit = new Edit(
-                        UUID.fromString(Objects.requireNonNull(
-                                row.getString("owner"))),
-                        Objects.requireNonNull(row.getString("before")),
-                        Objects.requireNonNull(row.getString("after"))
-                );
-
-                BlockData after =
-                        Bukkit.createBlockData(edit.after());
-
-                Bukkit.createBlockData(edit.before());
-                edits.put(pos, edit);
-
-                Heart heart = hearts.get(edit.owner());
-
-                if (heart != null
-                        && after.getMaterial() == heart.kind.ground()
-                        && heart.frontier.size() < 512) {
-                    heart.frontier.add(pos);
-                }
-            }
-        }
-
-        rebuildRollbackQueue();
-    }
-
-    private void write(Map<Pos, Edit> rows) throws IOException {
-        YamlConfiguration yaml = new YamlConfiguration();
-
-        for (Heart heart : hearts.values()) {
-            String path = "hearts." + heart.id + ".";
-
-            yaml.set(path + "kind", heart.kind.name());
-            yaml.set(path + "pos", heart.pos.key());
-            yaml.set(path + "radius", heart.radius);
-            yaml.set(path + "spread", heart.spreadSeconds);
-            yaml.set(path + "danger", heart.damageAfter);
-            yaml.set(path + "defence", heart.defence);
-            yaml.set(path + "guards", heart.guardLimit);
-            yaml.set(path + "cooldown", heart.cooldown);
-        }
-
-        for (var entry : rows.entrySet()) {
-            String path = "blocks." + entry.getKey().key() + ".";
-            Edit edit = entry.getValue();
-
-            yaml.set(path + "owner", edit.owner().toString());
-            yaml.set(path + "before", edit.before());
-            yaml.set(path + "after", edit.after());
-        }
-
-        Files.createDirectories(file.getParent());
-
-        Path temporary = file.resolveSibling(
-                file.getFileName() + ".tmp"
-        );
-
-        Files.writeString(
-                temporary,
-                yaml.saveToString(),
-                StandardCharsets.UTF_8
-        );
-
-        try {
-            Files.move(
-                    temporary,
-                    file,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-        } catch (AtomicMoveNotSupportedException ex) {
-            Files.move(
-                    temporary,
-                    file,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-        }
-    }
-
-    static int clamp(int value, int minimum, int maximum) {
-        return Math.max(minimum, Math.min(maximum, value));
+    @Override
+    public void close() throws Exception {
+        sql.close();
     }
 }
